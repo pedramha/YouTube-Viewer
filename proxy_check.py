@@ -1,7 +1,7 @@
 """
 MIT License
 
-Copyright (c) 2021 MShawon
+Copyright (c) 2021-2023 MShawon
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -21,11 +21,12 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 """
-
-import concurrent.futures.thread
 import os
 import shutil
-from concurrent.futures import ThreadPoolExecutor, as_completed
+import sys
+from concurrent.futures import ThreadPoolExecutor, wait
+from glob import glob
+from time import sleep
 
 import requests
 from fake_headers import Headers
@@ -62,22 +63,31 @@ print(bcolors.OKCYAN + """
 [ GitHub : https://github.com/MShawon/YouTube-Viewer ]
 """ + bcolors.ENDC)
 
-'''
-Backup previous checked goodproxies
-'''
-try:
-    os.remove('ProxyBackup.txt')
-except:
-    pass
-
-try:
-    shutil.copy('GoodProxy.txt', 'ProxyBackup.txt')
-    print(bcolors.WARNING + 'GoodProxy backed up in ProxyBackup' + bcolors.ENDC)
-    os.remove('GoodProxy.txt')
-except:
-    pass
 
 checked = {}
+cancel_all = False
+
+
+def backup():
+    try:
+        shutil.copy('GoodProxy.txt', 'ProxyBackup.txt')
+        print(bcolors.WARNING +
+              'GoodProxy.txt backed up in ProxyBackup.txt' + bcolors.ENDC)
+    except Exception:
+        pass
+
+    print('', file=open('GoodProxy.txt', 'w'))
+
+
+def clean_exe_temp(folder):
+    try:
+        temp_name = sys._MEIPASS.split('\\')[-1]
+    except Exception:
+        temp_name = None
+
+    for f in glob(os.path.join('temp', folder, '*')):
+        if temp_name not in f:
+            shutil.rmtree(f, ignore_errors=True)
 
 
 def load_proxy():
@@ -85,26 +95,38 @@ def load_proxy():
 
     filename = input(bcolors.OKBLUE +
                      'Enter your proxy file name: ' + bcolors.ENDC)
-    load = open(filename)
-    loaded = [items.rstrip().strip() for items in load]
-    load.close()
+
+    if not os.path.isfile(filename) and filename[-4:] != '.txt':
+        filename = f'{filename}.txt'
+
+    try:
+        with open(filename, encoding="utf-8") as fh:
+            loaded = [x.strip() for x in fh if x.strip() != '']
+    except Exception as e:
+        print(bcolors.FAIL + str(e) + bcolors.ENDC)
+        input('')
+        sys.exit()
 
     for lines in loaded:
+        if lines.count(':') == 3:
+            split = lines.split(':')
+            lines = f'{split[2]}:{split[-1]}@{split[0]}:{split[1]}'
         proxies.append(lines)
 
     return proxies
 
 
-def mainChecker(proxy_type, proxy, position):
+def main_checker(proxy_type, proxy, position):
+    if cancel_all:
+        raise KeyboardInterrupt
 
     checked[position] = None
 
-    proxyDict = {
-        "http": f"{proxy_type}://{proxy}",
-        "https": f"{proxy_type}://{proxy}",
-    }
-
     try:
+        proxy_dict = {
+            "http": f"{proxy_type}://{proxy}",
+            "https": f"{proxy_type}://{proxy}",
+        }
 
         header = Headers(
             headers=False
@@ -116,59 +138,88 @@ def mainChecker(proxy_type, proxy, position):
         }
 
         response = requests.get(
-            'https://www.youtube.com/', headers=headers, proxies=proxyDict, timeout=30)
+            'https://www.youtube.com/', headers=headers, proxies=proxy_dict, timeout=30)
         status = response.status_code
 
-        print(bcolors.OKBLUE + f"Tried {position+1} |" + bcolors.OKGREEN +
-              f' {proxy} | GOOD | Type : {proxy_type} | Response : {status}' + bcolors.ENDC)
+        if status != 200:
+            raise Exception(status)
 
-        print(proxy, file=open('GoodProxy.txt', 'a'))
+        print(bcolors.OKBLUE + f"Worker {position+1} | " + bcolors.OKGREEN +
+              f'{proxy} | GOOD | Type : {proxy_type} | Response : {status}' + bcolors.ENDC)
 
-    except:
-        print(bcolors.OKBLUE + f"Tried {position+1} |" + bcolors.FAIL +
-              f' {proxy} | {proxy_type} |BAD ' + bcolors.ENDC)
+        print(f'{proxy}|{proxy_type}', file=open('GoodProxy.txt', 'a'))
+
+    except Exception as e:
+        try:
+            e = int(e.args[0])
+        except Exception:
+            e = ''
+        print(bcolors.OKBLUE + f"Worker {position+1} | " + bcolors.FAIL +
+              f'{proxy} | {proxy_type} | BAD | {e}' + bcolors.ENDC)
         checked[position] = proxy_type
-        pass
 
 
-def proxyCheck(position):
-
+def proxy_check(position):
+    sleep(2)
     proxy = proxy_list[position]
 
-    mainChecker('http', proxy, position)
-    if checked[position] == 'http':
-        mainChecker('socks4', proxy, position)
-    if checked[position] == 'socks4':
-        mainChecker('socks5', proxy, position)
+    if '|' in proxy:
+        splitted = proxy.split('|')
+        main_checker(splitted[-1], splitted[0], position)
+    else:
+        main_checker('http', proxy, position)
+        if checked[position] == 'http':
+            main_checker('socks4', proxy, position)
+        if checked[position] == 'socks4':
+            main_checker('socks5', proxy, position)
 
 
 def main():
+    global cancel_all
+
+    cancel_all = False
     pool_number = [i for i in range(total_proxies)]
 
     with ThreadPoolExecutor(max_workers=threads) as executor:
-        futures = [executor.submit(proxyCheck, position)
+        futures = [executor.submit(proxy_check, position)
                    for position in pool_number]
-
+        done, not_done = wait(futures, timeout=0)
         try:
-            for future in as_completed(futures):
-                future.result()
+            while not_done:
+                freshly_done, not_done = wait(not_done, timeout=5)
+                done |= freshly_done
         except KeyboardInterrupt:
-            executor._threads.clear()
-            concurrent.futures.thread._threads_queues.clear()
+            print(bcolors.WARNING +
+                  'Hold on!!! Allow me a moment to finish the running threads' + bcolors.ENDC)
+            cancel_all = True
+            for future in not_done:
+                _ = future.cancel()
+            _ = wait(not_done, timeout=None)
+            raise KeyboardInterrupt
         except IndexError:
-            print(bcolors.WARNING + 'Number of proxies are less than threads. Provide more proxies or less threads.' + bcolors.ENDC)
-            pass
+            print(bcolors.WARNING + 'Number of proxies are less than threads. Provide more proxies or less threads. ' + bcolors.ENDC)
 
 
 if __name__ == '__main__':
-    threads = int(
-        input(bcolors.OKBLUE+'Threads (recommended = 100): ' + bcolors.ENDC))
+
+    clean_exe_temp(folder='proxy_check')
+    backup()
+
+    try:
+        threads = int(
+            input(bcolors.OKBLUE+'Threads (recommended = 100): ' + bcolors.ENDC))
+    except Exception:
+        threads = 100
 
     proxy_list = load_proxy()
-    proxy_list = list(set(proxy_list))  # removing duplicate proxies
-    proxy_list = list(filter(None, proxy_list))  # removing empty proxies
+    # removing empty & duplicate proxies
+    proxy_list = list(set(filter(None, proxy_list)))
 
     total_proxies = len(proxy_list)
-    print(bcolors.OKCYAN + f'Total proxies : {total_proxies}' + bcolors.ENDC)
+    print(bcolors.OKCYAN +
+          f'Total unique proxies : {total_proxies}' + bcolors.ENDC)
 
-    main()
+    try:
+        main()
+    except KeyboardInterrupt:
+        sys.exit()
